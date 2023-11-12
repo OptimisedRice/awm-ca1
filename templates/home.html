@@ -1,0 +1,176 @@
+<!-- templates/home.html -->
+{% extends "base.html" %}
+{% load leaflet_tags %}
+{% load static %}
+
+{% block title %}Find A Potty{% endblock %}
+{% block content %}
+<div class="container justify-content-sm-center">
+    <div class="row justify-content-md-center">
+        <div class="col-md-9 col-md-offset-3">
+            <nav class="navbar navbar-expand-md navbar-light bg-light mb-3">
+                <div class="container-fluid">
+                    <a class="navbar-brand" href="#">
+                        <img src="{% static 'images/favicon.png' %}" alt="" width="30" height="40" class="d-inline-block align-text-top">
+                        Find A Potty
+                    </a>
+                    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarSupportedContent" aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">
+                        <span class="navbar-toggler-icon"></span>
+                    </button>
+                    <div class="collapse navbar-collapse" id="navbarSupportedContent">
+                        <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+                            <li class="nav-item">
+                                <a class="nav-link active" aria-current="page" href="{% url 'home' %}">Home</a>
+                            </li>
+                            <li class="nav-item">
+                                {% if user.is_authenticated %}
+                                    <a class="nav-link" href="{% url 'logout' %}">Logout</a>
+                                {% else %}
+                                    <a class="nav-link" href="{% url 'login' %}">Login</a>
+                                {% endif %}
+                            </li>
+                              <li class="nav-item">
+                                   <a class="nav-link" href="#">Hi {{ user.username }}!</a>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+            </nav>
+
+            {% if user.is_authenticated %}
+            <style>
+                .leaflet-container {  /* all maps */
+                    height: 50vh;
+                }
+                .leaflet-control-container .leaflet-routing-container-hide {
+                 display: none;
+                }
+            </style>
+
+            <div id="nearest_toilet" class="alert alert-primary block" role="alert">
+            </div>
+            {% leaflet_map "leaflet-container" callback="window.map_init" %}
+            {% else %}
+
+            <div class="alert alert-primary block" role="alert">
+                You are not logged in. <a href="{% url 'login' %}" class="alert-link">Login Now</a>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<script>
+    let circle;
+    let marker;
+    function map_init (map, options) {
+        if (!navigator.geolocation) {
+            console.log("error")
+        } else {
+            navigator.geolocation.getCurrentPosition(success);
+        }
+
+        function success(position) {
+            load_toilets(map, position);
+            let location = L.latLng(position.coords.latitude, position.coords.longitude);
+            map.flyTo(location, 13);
+
+            const latitude = position.coords.latitude;
+            const longitude = position.coords.longitude;
+            const accuracy = position.coords.accuracy;
+
+            if (marker) map.removeLayer(marker);
+            marker = L.marker([latitude.valueOf(), longitude.valueOf()]).addTo(map);
+            if (circle) map.removeLayer(circle);
+            circle = L.circle([latitude.valueOf(), longitude.valueOf()], {radius: accuracy}).addTo(map);
+            update_db(position);
+        }
+    }
+
+    function update_db(position) {
+        let locString = position.coords.longitude + ", " + position.coords.latitude;
+            $.ajax({
+                type: "POST",
+                headers: {
+                    'X-CSRFToken': '{{ csrf_token }}'
+                },
+                url: "/updatedb/",
+                data: {
+                    point: locString
+                }
+            }).done(function (data, status, xhr) {
+                console.log(data["message"])
+                var originalMsg = $(".toast-body").html();
+                $(".toast-body").html(originalMsg + "<br/>Updated" +
+                    " database<br/>" + data["message"]);
+            }).fail(function (xhr, status, error) {
+                console.log(error);
+                var originalMsg = $(".toast-body").html();
+                $(".toast-body").html(originalMsg + "<br/>" + error);
+            }).always(function () {
+                console.log("find_loc_ed finished");
+                $(".toast").toast('show');
+            });
+    }
+
+    function load_toilets(map, position) {
+        let skibidi = L.icon({
+            iconUrl: '{% static "images/favicon.png" %}',
+            iconSize:     [20, 60], // size of the icon
+            iconAnchor:   [10, 60], // point of the icon which will correspond to marker's location
+            popupAnchor:  [0, -60] // point from which the popup should open relative to the iconAnchor
+        });
+        let closest_toilet = null
+        {% for toilet in toilets %}
+            marker = L.marker([{{ toilet.latitude }}, {{ toilet.longitude }}],{icon: skibidi}).addTo(map);
+
+            distance = map.distance([{{ toilet.latitude }}, {{ toilet.longitude }}],[position.coords.latitude, position.coords.longitude])
+
+
+            toilet_info = "<table><tbody>" +
+                "<tr><td>Location:</td><td>" +
+                "{{ toilet.location }}" +
+                "</td></tr>" +
+                "<tr><td>Opening Hours:</td><td>" +
+                "{{ toilet.opening_hours }}" +
+                "</td></tr>" +
+                "</tbody></table>"
+            marker.bindPopup(toilet_info).openPopup();
+
+            if(closest_toilet == null || closest_toilet.distance > distance) {
+                closest_toilet = {
+                    "longitude": {{ toilet.longitude }},
+                    "latitude": {{ toilet.latitude }},
+                    "address": "{{ toilet.location }}",
+                    "distance": distance,
+                    "toilet_info": toilet_info
+                };
+            }
+        {% endfor %}
+        let control = L.Routing.control({
+            plan: new L.Routing.Plan([
+                L.latLng(position.coords.latitude, position.coords.longitude),
+                L.latLng(closest_toilet.latitude, closest_toilet.longitude)
+                ], {
+                    createMarker: function(i, wp, nWps) {
+                      if (i === 1) {
+                          return L.marker(wp.latLng).bindPopup(closest_toilet.toilet_info);
+                      } else {
+                          return L.marker(wp.latLng);
+                      }
+                    },
+                    draggableWaypoints: false
+                }
+            ),
+            lineOptions : {
+                addWaypoints: false
+            },
+            router: new L.Routing.osrmv1({
+                profile: "walking"
+            })
+        }).addTo(map);
+        control.hide();
+        $("#nearest_toilet").text("Nearest toilet is at " + closest_toilet.address)
+    }
+</script>
+{% endblock %}
